@@ -4,54 +4,55 @@ import os
 
 app = Flask(__name__)
 
-POSTEX_API_KEY = os.getenv("POSTEX_API_KEY")
-WHATSAPP_API_URL = "https://api.ultramsg.com/instanceID/messages/chat"
-WHATSAPP_TOKEN = os.getenv("ULTRAMSG_TOKEN")
+# Only required token
+POSTEX_TOKEN = os.environ.get('POSTEX_TOKEN') or 'your_postex_token_here'
+POSTEX_ORDER_CREATION_URL = "https://api.postex.pk/services/integration/api/order/v3/create-order"
 
-@app.route("/webhook/orders", methods=["POST"])
-def handle_order():
-    data = request.get_json()
+# Sample webhook to receive Shopify orders and send to PostEx
+@app.route('/webhook/shopify/order', methods=['POST'])
+def handle_shopify_order():
+    data = request.json
 
-    name = data["customer"]["first_name"]
-    phone = data["customer"]["phone"]
-    address = data["shipping_address"]["address1"]
-    city = data["shipping_address"]["city"]
-    amount = data["total_price"]
-    order_id = data["id"]
-    items = data["line_items"]
-
-    product_list = [{"name": i["title"], "qty": i["quantity"]} for i in items]
+    # Extract fields from Shopify order payload
+    order_id = data.get("id")
+    customer = data.get("customer", {})
+    shipping_address = data.get("shipping_address", {})
+    total_price = data.get("total_price")
+    line_items = data.get("line_items", [])
 
     postex_payload = {
-        "customer_name": name,
-        "customer_phone": phone,
-        "address": f"{address}, {city}",
-        "city": city,
-        "cod_amount": amount,
-        "products": product_list,
-        "client_reference": f"shopify_{order_id}"
+        "cityName": shipping_address.get("city"),
+        "customerName": f"{customer.get('first_name', '')} {customer.get('last_name', '')}",
+        "customerPhone": shipping_address.get("phone", "03000000000"),  # fallback
+        "deliveryAddress": f"{shipping_address.get('address1', '')}, {shipping_address.get('address2', '')}",
+        "invoiceDivision": 1,
+        "invoicePayment": total_price,
+        "items": sum(item.get("quantity", 1) for item in line_items),
+        "orderDetail": ", ".join([f"{item['quantity']}x {item['title']}" for item in line_items]),
+        "orderRefNumber": str(order_id),
+        "orderType": "Normal"
     }
 
-    postex_res = requests.post(
-        "https://api.postex.pk/v1/order",
-        json=postex_payload,
-        headers={"Authorization": f"Bearer {POSTEX_API_KEY}"}
-    )
+    headers = {
+        "token": POSTEX_TOKEN,
+        "Content-Type": "application/json"
+    }
 
-    if postex_res.status_code != 200:
-        return jsonify({"error": "PostEx failed"}), 500
+    try:
+        res = requests.post(POSTEX_ORDER_CREATION_URL, json=postex_payload, headers=headers)
+        res.raise_for_status()
+        tracking_number = res.json().get("dist", {}).get("trackingNumber")
 
-    tracking = postex_res.json().get("tracking_number")
+        return jsonify({"message": "Order sent to PostEx", "tracking": tracking_number}), 200
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": str(e)}), 500
 
-    message = f"Hi {name}, your order #{order_id} has been placed via PostEx. Tracking: {tracking}"
-    whatsapp_payload = {"token": WHATSAPP_TOKEN, "to": phone, "body": message}
+# PostEx webhook receiver for tracking updates
+@app.route('/webhook/postex/tracking', methods=['POST'])
+def postex_tracking_webhook():
+    data = request.json
+    print("Received PostEx Tracking Webhook:", data)
+    return "OK", 200
 
-    whats_res = requests.post(WHATSAPP_API_URL, json=whatsapp_payload)
-
-    if whats_res.status_code != 200:
-        return jsonify({"error": "WhatsApp failed"}), 500
-
-    return jsonify({"message": "Order sent to PostEx and WhatsApp!"})
-
-if __name__ == "__main__":
-    app.run()
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
